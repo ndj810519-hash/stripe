@@ -10,8 +10,6 @@ import stripe
 import firebase_admin
 
 from firebase_admin import credentials, firestore
-from datetime import datetime, timedelta
-
 
 app = FastAPI()
 
@@ -32,6 +30,9 @@ VOICEFLOW_PROJECT_ID = os.getenv("VOICEFLOW_PROJECT_ID")
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+# 👉 ВСТАВЬ СВОЙ price_id
+STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")
 
 stripe.api_key = STRIPE_SECRET_KEY
 
@@ -54,10 +55,7 @@ class UserMessage(BaseModel):
 @app.post("/ask")
 def ask_voiceflow(data: UserMessage):
 
-    # ❗ ЖЁСТКО используем user_id (без UUID)
-    user_id = data.user_id
-
-    user_ref = db.collection("users").document(user_id)
+    user_ref = db.collection("users").document(data.user_id)
     user_doc = user_ref.get()
 
     if not user_doc.exists:
@@ -65,133 +63,63 @@ def ask_voiceflow(data: UserMessage):
 
     user_data = user_doc.to_dict()
 
-    has_access = user_data.get("hasAccess")
-    expires_at = user_data.get("expiresAt")
-
-    if not has_access:
+    # ❗ ПРОСТАЯ И ЖЁСТКАЯ ПРОВЕРКА
+    if not user_data.get("hasAccess"):
         return {
             "expired": True,
-            "text": "⛔ Session ended. Please оплатите доступ."
-        }
-
-    if not expires_at:
-        return {
-            "expired": True,
-            "text": "⛔ Нет активной подписки."
-        }
-
-    if hasattr(expires_at, "tzinfo") and expires_at.tzinfo is not None:
-        expires_at = expires_at.replace(tzinfo=None)
-
-    if datetime.utcnow() > expires_at:
-
-        user_ref.update({
-            "hasAccess": False,
-            "minutesRemaining": 0
-        })
-
-        return {
-            "expired": True,
-            "text": "⏳ Время сессии завершено. Оплатите новую консультацию."
+            "text": "⛔ Подписка не активна. Оплатите доступ."
         }
 
     # ===== Voiceflow =====
 
-    url = f"https://general-runtime.voiceflow.com/state/user/{user_id}/interact"
-
-    headers = {
-        "Authorization": VOICEFLOW_API_KEY,
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "request": {
-            "type": "text",
-            "payload": data.message
-        }
-    }
+    url = f"https://general-runtime.voiceflow.com/state/user/{data.user_id}/interact"
 
     response = requests.post(
         url,
-        headers=headers,
-        json=payload,
+        headers={
+            "Authorization": VOICEFLOW_API_KEY,
+            "Content-Type": "application/json"
+        },
+        json={
+            "request": {
+                "type": "text",
+                "payload": data.message
+            }
+        },
         params={"projectID": VOICEFLOW_PROJECT_ID}
     )
-
-    if response.status_code != 200:
-        return {"error": response.text}
 
     traces = response.json()
 
     texts = []
-    for trace in traces:
-        if trace.get("type") == "text":
-            texts.append(trace["payload"]["message"])
+    for t in traces:
+        if t.get("type") == "text":
+            texts.append(t["payload"]["message"])
 
     return {"text": "\n".join(texts)}
 
+# ================= CREATE SUBSCRIPTION =================
 
-# ================= STRIPE CHECKOUT =================
-
-@app.get("/create-checkout-session")
-async def create_checkout_session(request: Request):
-
-    email = request.query_params.get("email")
-    uid = request.query_params.get("uid")
-
-    session = stripe.checkout.Session.create(
-        client_reference_id=uid,
-        payment_method_types=["card"],
-        mode="payment",
-        customer_email=email,
-        metadata={
-            "user_id": uid,
-            "agent": "seidkona"
-        },
-        line_items=[{
-            "price_data": {
-                "currency": "usd",
-                "product_data": {"name": "Consultation 10 min"},
-                "unit_amount": 999,
-            },
-            "quantity": 1,
-        }],
-        success_url="https://seid-chat.carrd.co",
-        cancel_url="https://seidkona.carrd.co/",
-    )
-
-    return RedirectResponse(session.url)
-
-
-@app.get("/create-checkout-session-ruslan")
-async def create_checkout_session_ruslan(request: Request):
+@app.get("/create-subscription")
+async def create_subscription(request: Request):
 
     email = request.query_params.get("email")
     uid = request.query_params.get("uid")
 
     session = stripe.checkout.Session.create(
-        client_reference_id=uid,
+        mode="subscription",
         payment_method_types=["card"],
-        mode="payment",
         customer_email=email,
-        metadata={
-            "user_id": uid,
-            "agent": "ruslan"
-        },
+        client_reference_id=uid,
         line_items=[{
-            "price_data": {
-                "currency": "usd",
-                "product_data": {"name": "Consultation 1 hour"},
-                "unit_amount": 999,
-            },
+            "price": STRIPE_PRICE_ID,
             "quantity": 1,
         }],
         success_url="https://chat-rus.carrd.co/",
-        cancel_url="https://ruslan-sp.carrd.co/",
+        cancel_url="https://your-site.carrd.co/"
     )
 
     return RedirectResponse(session.url)
-
 
 # ================= STRIPE WEBHOOK =================
 
@@ -210,30 +138,45 @@ async def stripe_webhook(request: Request):
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
+    # ✅ УСПЕШНАЯ ОПЛАТА
     if event["type"] == "checkout.session.completed":
 
         session = event["data"]["object"]
         uid = session.get("client_reference_id")
 
-        metadata = session.get("metadata", {})
-        agent = metadata.get("agent")
-
-        user_ref = db.collection("users").document(uid)
-
-        # логика времени
-        if agent == "ruslan":
-            expires_at = datetime.utcnow() + timedelta(hours=1)
-            minutes = 60
-        else:
-            expires_at = datetime.utcnow() + timedelta(minutes=10)
-            minutes = 10
-
-        user_ref.set({
+        db.collection("users").document(uid).set({
             "hasAccess": True,
-            "minutesRemaining": minutes,
-            "expiresAt": expires_at
+            "subscriptionActive": True
         }, merge=True)
 
-        return {"status": "success"}
+    # ❌ НЕ СПИСАЛИСЬ ДЕНЬГИ
+    if event["type"] == "invoice.payment_failed":
 
-    return {"status": "ignored"}
+        invoice = event["data"]["object"]
+        customer_email = invoice.get("customer_email")
+
+        users = db.collection("users").stream()
+
+        for user in users:
+            data = user.to_dict()
+            if data.get("email") == customer_email:
+                db.collection("users").document(user.id).update({
+                    "hasAccess": False,
+                    "subscriptionActive": False
+                })
+
+    # ❌ ПОДПИСКА ОТМЕНЕНА
+    if event["type"] == "customer.subscription.deleted":
+
+        subscription = event["data"]["object"]
+        customer = subscription.get("customer")
+
+        users = db.collection("users").stream()
+
+        for user in users:
+            db.collection("users").document(user.id).update({
+                "hasAccess": False,
+                "subscriptionActive": False
+            })
+
+    return {"status": "ok"}

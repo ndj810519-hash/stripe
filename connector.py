@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import os
@@ -30,8 +31,6 @@ VOICEFLOW_PROJECT_ID = os.getenv("VOICEFLOW_PROJECT_ID")
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
-
-# 👉 ВСТАВЬ СВОЙ price_id
 STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")
 
 stripe.api_key = STRIPE_SECRET_KEY
@@ -63,7 +62,7 @@ def ask_voiceflow(data: UserMessage):
 
     user_data = user_doc.to_dict()
 
-    # ❗ ПРОСТАЯ И ЖЁСТКАЯ ПРОВЕРКА
+    # ❗ ЖЁСТКАЯ БЛОКИРОВКА
     if not user_data.get("hasAccess"):
         return {
             "expired": True,
@@ -106,6 +105,9 @@ async def create_subscription(request: Request):
     email = request.query_params.get("email")
     uid = request.query_params.get("uid")
 
+    if not email or not uid:
+        raise HTTPException(status_code=400, detail="Missing email or uid")
+
     session = stripe.checkout.Session.create(
         mode="subscription",
         payment_method_types=["card"],
@@ -138,7 +140,7 @@ async def stripe_webhook(request: Request):
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
-    # ✅ УСПЕШНАЯ ОПЛАТА
+    # ✅ УСПЕШНАЯ ПОДПИСКА
     if event["type"] == "checkout.session.completed":
 
         session = event["data"]["object"]
@@ -149,7 +151,7 @@ async def stripe_webhook(request: Request):
             "subscriptionActive": True
         }, merge=True)
 
-    # ❌ НЕ СПИСАЛИСЬ ДЕНЬГИ
+    # ❌ НЕУДАЧНОЕ СПИСАНИЕ
     if event["type"] == "invoice.payment_failed":
 
         invoice = event["data"]["object"]
@@ -168,9 +170,6 @@ async def stripe_webhook(request: Request):
     # ❌ ПОДПИСКА ОТМЕНЕНА
     if event["type"] == "customer.subscription.deleted":
 
-        subscription = event["data"]["object"]
-        customer = subscription.get("customer")
-
         users = db.collection("users").stream()
 
         for user in users:
@@ -180,3 +179,7 @@ async def stripe_webhook(request: Request):
             })
 
     return {"status": "ok"}
+
+# ================= STATIC FILES (PWA) =================
+
+app.mount("/", StaticFiles(directory=".", html=True), name="static")

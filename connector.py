@@ -1,16 +1,17 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import os
+import uuid
 import json
 import requests
 import stripe
 import firebase_admin
 
 from firebase_admin import credentials, firestore
+from datetime import datetime
 
 app = FastAPI()
 
@@ -31,9 +32,22 @@ VOICEFLOW_PROJECT_ID = os.getenv("VOICEFLOW_PROJECT_ID")
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
-STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")
 
 stripe.api_key = STRIPE_SECRET_KEY
+
+# ================= PRICE MAP =================
+
+PRICE_MAP = {
+    "ruslan": "prod_UBmcS7j0MF7B8N",
+    "seidkona": "prod_UBmbaT6w0B1GtD"
+}
+
+# ================= SUCCESS URL MAP =================
+
+SUCCESS_URLS = {
+    "ruslan": "https://chat-rus.carrd.co/",
+    "seidkona": "https://seid-chat.carrd.co/"
+}
 
 # ================= FIREBASE =================
 
@@ -48,13 +62,20 @@ db = firestore.client()
 
 class UserMessage(BaseModel):
     message: str
-    user_id: str
+    user_id: str | None = None
+    app: str | None = None
 
 
 @app.post("/ask")
 def ask_voiceflow(data: UserMessage):
 
-    user_ref = db.collection("users").document(data.user_id)
+    user_id = data.user_id or str(uuid.uuid4())
+    app_name = data.app
+
+    if not app_name:
+        return {"text": "App not specified"}
+
+    user_ref = db.collection("users").document(user_id)
     user_doc = user_ref.get()
 
     if not user_doc.exists:
@@ -62,16 +83,16 @@ def ask_voiceflow(data: UserMessage):
 
     user_data = user_doc.to_dict()
 
-    # ❗ ЖЁСТКАЯ БЛОКИРОВКА
-    if not user_data.get("hasAccess"):
+    # 🔒 ПРОВЕРКА ДОСТУПА
+    if not user_data.get("access", {}).get(app_name):
         return {
             "expired": True,
-            "text": "⛔ Подписка не активна. Оплатите доступ."
+            "text": f"⛔ Нет доступа к {app_name}. Оплатите подписку."
         }
 
-    # ===== Voiceflow =====
+    # === Voiceflow ===
 
-    url = f"https://general-runtime.voiceflow.com/state/user/{data.user_id}/interact"
+    url = f"https://general-runtime.voiceflow.com/state/user/{user_id}/interact"
 
     response = requests.post(
         url,
@@ -90,10 +111,10 @@ def ask_voiceflow(data: UserMessage):
 
     traces = response.json()
 
-    texts = []
-    for t in traces:
-        if t.get("type") == "text":
-            texts.append(t["payload"]["message"])
+    texts = [
+        t["payload"]["message"]
+        for t in traces if t.get("type") == "text"
+    ]
 
     return {"text": "\n".join(texts)}
 
@@ -104,21 +125,31 @@ async def create_subscription(request: Request):
 
     email = request.query_params.get("email")
     uid = request.query_params.get("uid")
+    app_name = request.query_params.get("app")
 
-    if not email or not uid:
-        raise HTTPException(status_code=400, detail="Missing email or uid")
+    if not email or not uid or not app_name:
+        raise HTTPException(status_code=400, detail="Missing params")
+
+    if app_name not in PRICE_MAP:
+        raise HTTPException(status_code=400, detail="Invalid app")
+
+    price_id = PRICE_MAP[app_name]
+    success_url = SUCCESS_URLS.get(app_name)
 
     session = stripe.checkout.Session.create(
         mode="subscription",
         payment_method_types=["card"],
         customer_email=email,
         client_reference_id=uid,
+        metadata={
+            "app": app_name
+        },
         line_items=[{
-            "price": STRIPE_PRICE_ID,
+            "price": price_id,
             "quantity": 1,
         }],
-        success_url="https://chat-rus.carrd.co/",
-        cancel_url="https://your-site.carrd.co/"
+        success_url=success_url,
+        cancel_url="https://enoma-en.carrd.co/"
     )
 
     return RedirectResponse(session.url)
@@ -145,41 +176,34 @@ async def stripe_webhook(request: Request):
 
         session = event["data"]["object"]
         uid = session.get("client_reference_id")
+        app_name = session["metadata"].get("app")
 
-        db.collection("users").document(uid).set({
-            "hasAccess": True,
-            "subscriptionActive": True
-        }, merge=True)
-
-    # ❌ НЕУДАЧНОЕ СПИСАНИЕ
-    if event["type"] == "invoice.payment_failed":
-
-        invoice = event["data"]["object"]
-        customer_email = invoice.get("customer_email")
-
-        users = db.collection("users").stream()
-
-        for user in users:
-            data = user.to_dict()
-            if data.get("email") == customer_email:
-                db.collection("users").document(user.id).update({
-                    "hasAccess": False,
-                    "subscriptionActive": False
-                })
-
-    # ❌ ПОДПИСКА ОТМЕНЕНА
-    if event["type"] == "customer.subscription.deleted":
-
-        users = db.collection("users").stream()
-
-        for user in users:
-            db.collection("users").document(user.id).update({
-                "hasAccess": False,
-                "subscriptionActive": False
-            })
+        if uid and app_name:
+            db.collection("users").document(uid).set({
+                f"access.{app_name}": True,
+                "updatedAt": datetime.utcnow()
+            }, merge=True)
 
     return {"status": "ok"}
 
-# ================= STATIC FILES (PWA) =================
+# ================= CHECK ACCESS =================
 
+@app.get("/check-access")
+def check_access(uid: str, app: str):
+
+    user_ref = db.collection("users").document(uid)
+    user_doc = user_ref.get()
+
+    if not user_doc.exists:
+        return {"access": False}
+
+    data = user_doc.to_dict()
+
+    return {
+        "access": data.get("access", {}).get(app, False)
+    }
+
+# ================= STATIC =================
+
+from fastapi.staticfiles import StaticFiles
 app.mount("/", StaticFiles(directory=".", html=True), name="static")

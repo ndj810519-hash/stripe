@@ -38,8 +38,8 @@ stripe.api_key = STRIPE_SECRET_KEY
 # ================= PRICE MAP =================
 
 PRICE_MAP = {
-    "ruslan": "prod_UBmcS7j0MF7B8N",
-    "seidkona": "prod_UBmbaT6w0B1GtD"
+    "ruslan": "price_1TDP3QLFX8j1bLMXM4V2iPwU",
+    "seidkona": "price_1TDP1qLFX8j1bLMXPBe5DepK"
 }
 
 # ================= SUCCESS URL MAP =================
@@ -207,3 +207,38 @@ def check_access(uid: str, app: str):
 
 from fastapi.staticfiles import StaticFiles
 app.mount("/", StaticFiles(directory=".", html=True), name="static")
+
+
+from fastapi.responses import HTMLResponse
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>ENOMA</title>
+
+        <link rel="manifest" href="/manifest.json">
+        <meta name="theme-color" content="#000000">
+
+        <link rel="icon" href="/icon-192.png">
+
+        <style>
+            body {
+                background: black;
+                color: white;
+                font-family: Arial;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                height: 100vh;
+                margin: 0;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>ENOMA APP</h1>
+    </body>
+    </html>
+    """

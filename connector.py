@@ -45,8 +45,8 @@ PRICE_MAP = {
 # ================= SUCCESS URL MAP =================
 
 SUCCESS_URLS = {
-    "ruslan": "https://chat-rus.carrd.co/",
-    "seidkona": "https://seid-chat.carrd.co/"
+    "ruslan": "https://enoma.kz/rus-chat",
+    "seidkona": "https://enoma.kz/seid-chat"
 }
 
 # ================= FIREBASE =================
@@ -149,7 +149,7 @@ async def create_subscription(request: Request):
             "quantity": 1,
         }],
         success_url=success_url,
-        cancel_url="https://enoma-en.carrd.co/"
+        cancel_url="https://enoma.kz/"
     )
 
     return RedirectResponse(session.url)
@@ -207,38 +207,3 @@ def check_access(uid: str, app: str):
 
 from fastapi.staticfiles import StaticFiles
 app.mount("/", StaticFiles(directory=".", html=True), name="static")
-
-
-from fastapi.responses import HTMLResponse
-
-@app.get("/", response_class=HTMLResponse)
-def home():
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>ENOMA</title>
-
-        <link rel="manifest" href="/manifest.json">
-        <meta name="theme-color" content="#000000">
-
-        <link rel="icon" href="/icon-192.png">
-
-        <style>
-            body {
-                background: black;
-                color: white;
-                font-family: Arial;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                height: 100vh;
-                margin: 0;
-            }
-        </style>
-    </head>
-    <body>
-        <h1>ENOMA APP</h1>
-    </body>
-    </html>
-    """

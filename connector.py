@@ -212,7 +212,38 @@ async def forte_success(request: Request):
     db.collection("forte_orders").document(order_id).update({
         "isProcessed": True
     })
+@app.get("/session-time")
+def session_time(uid: str):
 
+    user_ref = db.collection("users").document(uid)
+    user_doc = user_ref.get()
+
+    if not user_doc.exists:
+        return {"hasAccess": False, "remainingSeconds": 0}
+
+    data = user_doc.to_dict()
+
+    if not data.get("hasAccess"):
+        return {"hasAccess": False, "remainingSeconds": 0}
+
+    expires_at = data.get("expiresAt")
+
+    if not expires_at:
+        return {"hasAccess": False, "remainingSeconds": 0}
+
+    if hasattr(expires_at, "tzinfo") and expires_at.tzinfo:
+        expires_at = expires_at.replace(tzinfo=None)
+
+    remaining = (expires_at - datetime.utcnow()).total_seconds()
+
+    if remaining <= 0:
+        user_ref.update({"hasAccess": False})
+        return {"hasAccess": False, "remainingSeconds": 0}
+
+    return {
+        "hasAccess": True,
+        "remainingSeconds": int(remaining)
+    }
     if agent == "seidkona":
         return RedirectResponse("https://enoma.kz/seid-chat")
 

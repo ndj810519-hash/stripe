@@ -214,3 +214,8 @@ def session_time(uid: str):
         return {"hasAccess": False, "remainingSeconds": 0}
 
     return {"hasAccess": True, "remainingSeconds": int(remaining)}
+
+from fastapi.staticfiles import StaticFiles
+
+# 🔥 подключаем статические файлы (manifest + иконки)
+app.mount("/static", StaticFiles(directory="static"), name="static")

@@ -7,11 +7,12 @@ import os
 import uuid
 import json
 import requests
-import stripe
 import firebase_admin
+import base64
 
 from firebase_admin import credentials, firestore
-from datetime import datetime
+from datetime import datetime, timedelta
+
 
 app = FastAPI()
 
@@ -25,31 +26,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ================= ENV =================
+# ================= ENV VARIABLES =================
 
 VOICEFLOW_API_KEY = os.getenv("VOICEFLOW_API_KEY")
 VOICEFLOW_PROJECT_ID = os.getenv("VOICEFLOW_PROJECT_ID")
 
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+FORTE_API_URL = os.getenv("FORTE_API_URL")
+FORTE_USERNAME = os.getenv("FORTE_USERNAME")
+FORTE_PASSWORD = os.getenv("FORTE_PASSWORD")
 
-stripe.api_key = STRIPE_SECRET_KEY
-
-# ================= PRICE MAP =================
-
-PRICE_MAP = {
-    "ruslan": "price_1TDP3QLFX8j1bLMXM4V2iPwU",
-    "seidkona": "price_1TDP1qLFX8j1bLMXPBe5DepK"
-}
-
-# ================= SUCCESS URL MAP =================
-
-SUCCESS_URLS = {
-    "ruslan": "https://enoma.kz/rus-chat",
-    "seidkona": "https://enoma.kz/seid-chat"
-}
-
-# ================= FIREBASE =================
+# ================= FIREBASE INIT =================
 
 if not firebase_admin._apps:
     firebase_json = os.getenv("FIREBASE_KEY_JSON")
@@ -63,17 +49,12 @@ db = firestore.client()
 class UserMessage(BaseModel):
     message: str
     user_id: str | None = None
-    app: str | None = None
 
 
 @app.post("/ask")
 def ask_voiceflow(data: UserMessage):
 
     user_id = data.user_id or str(uuid.uuid4())
-    app_name = data.app
-
-    if not app_name:
-        return {"text": "App not specified"}
 
     user_ref = db.collection("users").document(user_id)
     user_doc = user_ref.get()
@@ -83,127 +64,204 @@ def ask_voiceflow(data: UserMessage):
 
     user_data = user_doc.to_dict()
 
-    # 🔒 ПРОВЕРКА ДОСТУПА
-    if not user_data.get("access", {}).get(app_name):
+    has_access = user_data.get("hasAccess")
+    expires_at = user_data.get("expiresAt")
+
+    if not has_access:
         return {
             "expired": True,
-            "text": f"⛔ Нет доступа к {app_name}. Оплатите подписку."
+            "text": "⛔ Оплатите доступ"
         }
 
-    # === Voiceflow ===
+    if not expires_at:
+        return {
+            "expired": True,
+            "text": "⛔ Нет активной сессии"
+        }
+
+    if hasattr(expires_at, "tzinfo") and expires_at.tzinfo is not None:
+        expires_at = expires_at.replace(tzinfo=None)
+
+    if datetime.utcnow() > expires_at:
+
+        user_ref.update({
+            "hasAccess": False,
+        })
+
+        return {
+            "expired": True,
+            "text": "⏳ Время истекло"
+        }
 
     url = f"https://general-runtime.voiceflow.com/state/user/{user_id}/interact"
 
+    headers = {
+        "Authorization": VOICEFLOW_API_KEY,
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "request": {
+            "type": "text",
+            "payload": data.message
+        },
+        "config": {
+            "tts": False,
+            "stripSSML": True
+        }
+    }
+
     response = requests.post(
         url,
-        headers={
-            "Authorization": VOICEFLOW_API_KEY,
-            "Content-Type": "application/json"
-        },
-        json={
-            "request": {
-                "type": "text",
-                "payload": data.message
-            }
-        },
+        headers=headers,
+        json=payload,
         params={"projectID": VOICEFLOW_PROJECT_ID}
     )
 
     traces = response.json()
 
-    texts = [
-        t["payload"]["message"]
-        for t in traces if t.get("type") == "text"
-    ]
+    texts = []
 
-    return {"text": "\n".join(texts)}
+    for trace in traces:
+        if trace.get("type") == "text":
+            texts.append(trace["payload"]["message"])
 
-# ================= CREATE SUBSCRIPTION =================
+    return {
+        "text": "\n".join(texts)
+    }
 
-@app.get("/create-subscription")
-async def create_subscription(request: Request):
-
-    email = request.query_params.get("email")
-    uid = request.query_params.get("uid")
-    app_name = request.query_params.get("app")
-
-    if not email or not uid or not app_name:
-        raise HTTPException(status_code=400, detail="Missing params")
-
-    if app_name not in PRICE_MAP:
-        raise HTTPException(status_code=400, detail="Invalid app")
-
-    price_id = PRICE_MAP[app_name]
-    success_url = SUCCESS_URLS.get(app_name)
-
-    session = stripe.checkout.Session.create(
-        mode="subscription",
-        payment_method_types=["card"],
-        customer_email=email,
-        client_reference_id=uid,
-        metadata={
-            "app": app_name
-        },
-        line_items=[{
-            "price": price_id,
-            "quantity": 1,
-        }],
-        success_url=success_url,
-        cancel_url="https://enoma.kz/"
-    )
-
-    return RedirectResponse(session.url)
-
-# ================= STRIPE WEBHOOK =================
-
-@app.post("/stripe-webhook")
-async def stripe_webhook(request: Request):
-
-    payload = await request.body()
-    sig_header = request.headers.get("stripe-signature")
-
-    try:
-        event = stripe.Webhook.construct_event(
-            payload,
-            sig_header,
-            STRIPE_WEBHOOK_SECRET
-        )
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
-
-    # ✅ УСПЕШНАЯ ПОДПИСКА
-    if event["type"] == "checkout.session.completed":
-
-        session = event["data"]["object"]
-        uid = session.get("client_reference_id")
-        app_name = session["metadata"].get("app")
-
-        if uid and app_name:
-            db.collection("users").document(uid).set({
-                f"access.{app_name}": True,
-                "updatedAt": datetime.utcnow()
-            }, merge=True)
-
-    return {"status": "ok"}
 
 # ================= CHECK ACCESS =================
 
 @app.get("/check-access")
-def check_access(uid: str, app: str):
+async def check_access(uid: str):
 
     user_ref = db.collection("users").document(uid)
-    user_doc = user_ref.get()
+    user = user_ref.get()
 
-    if not user_doc.exists:
+    if not user.exists:
         return {"access": False}
 
-    data = user_doc.to_dict()
+    data = user.to_dict()
 
-    return {
-        "access": data.get("access", {}).get(app, False)
+    if not data.get("hasAccess"):
+        return {"access": False}
+
+    expires_at = data.get("expiresAt")
+
+    if not expires_at:
+        return {"access": False}
+
+    if datetime.utcnow() > expires_at:
+        user_ref.update({
+            "hasAccess": False,
+        })
+
+        return {"access": False}
+
+    return {"access": True}
+
+
+# ================= FORTE CREATE ORDER =================
+
+@app.get("/create-forte-order")
+async def create_forte_order(uid: str, agent: str):
+
+    payload = {
+        "order": {
+            "typeRid": "Order_RID",
+            "language": "ru",
+            "amount": "990.00",
+            "currency": "KZT",
+            "description": f"{uid}|question|{agent}",
+            "title": "Quick Question",
+            "hppRedirectUrl": "https://stripe-2dya.onrender.com/forte-success"
+        }
     }
 
-# ================= STATIC =================
+    response = requests.post(
+        f"{FORTE_API_URL}/order",
+        json=payload,
+        auth=(FORTE_USERNAME, FORTE_PASSWORD),
+        headers={"Content-Type": "application/json"}
+    )
 
-from fastapi.staticfiles import StaticFiles
-app.mount("/", StaticFiles(directory=".", html=True), name="static")
+    forte_response = response.json()
+
+    order_id = str(forte_response["order"]["id"])
+    order_password = forte_response["order"]["password"]
+    hpp_url = forte_response["order"]["hppUrl"]
+
+    db.collection("forte_orders").document(order_id).set({
+        "uid": uid,
+        "agent": agent,
+        "createdAt": datetime.utcnow(),
+        "isProcessed": False
+    })
+
+    pay_url = f"{hpp_url}?id={order_id}&password={order_password}"
+
+    return RedirectResponse(pay_url)
+
+
+# ================= FORTE VERIFY AFTER PAYMENT =================
+
+@app.get("/forte-success")
+async def forte_success(request: Request):
+
+    try:
+        order_id = request.query_params.get("ID") or request.query_params.get("id")
+
+        if not order_id:
+            return RedirectResponse("https://enoma.kz/main-ru")
+
+        response = requests.get(
+            f"{FORTE_API_URL}/order/{order_id}",
+            auth=(FORTE_USERNAME, FORTE_PASSWORD)
+        )
+
+        result = response.json()
+        order_status = result.get("order", {}).get("status")
+
+        if order_status not in ["FullyPaid", "Approved", "Deposited"]:
+            return RedirectResponse("https://enoma.kz/main-ru")
+
+        order_doc = db.collection("forte_orders").document(order_id).get()
+
+        if not order_doc.exists:
+            return RedirectResponse("https://enoma.kz/main-ru")
+
+        order_info = order_doc.to_dict()
+
+        if order_info.get("isProcessed"):
+            agent = order_info.get("agent")
+
+            if agent == "seidkona":
+                return RedirectResponse("https://enoma.kz/seid-chat")
+            return RedirectResponse("https://enoma.kz/rus-chat")
+
+        uid = order_info["uid"]
+        agent = order_info.get("agent", "ruslan")
+
+        now = datetime.utcnow()
+        expires_at = now + timedelta(minutes=5)
+
+        db.collection("users").document(uid).set({
+            "hasAccess": True,
+            "expiresAt": expires_at,
+            "agent": agent,
+            "lastPaymentAt": now
+        }, merge=True)
+
+        db.collection("forte_orders").document(order_id).update({
+            "isProcessed": True,
+            "paidAt": now
+        })
+
+        if agent == "seidkona":
+            return RedirectResponse("https://enoma.kz/seid-chat")
+
+        return RedirectResponse("https://enoma.kz/rus-chat")
+
+    except Exception as e:
+        return {"error": str(e)}

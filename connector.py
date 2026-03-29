@@ -175,7 +175,7 @@ async def forte_success(request: Request):
     now = datetime.utcnow()
     expires_at = now + timedelta(minutes=5)
 
-    # 🔥 ВСЕГДА ОБНОВЛЯЕМ ДОСТУП (повторная оплата работает)
+    # 🔥 ВСЕГДА ОБНОВЛЯЕМ ДОСТУП
     db.collection("users").document(uid).set({
         "hasAccess": True,
         "expiresAt": expires_at,
@@ -183,10 +183,11 @@ async def forte_success(request: Request):
         "lastPaymentAt": now
     }, merge=True)
 
+    # ✅ FIX: передаём uid в чат
     if agent == "seidkona":
-        return RedirectResponse("https://enoma.kz/seid-chat")
+        return RedirectResponse(f"https://enoma.kz/seid-chat?uid={uid}")
 
-    return RedirectResponse("https://enoma.kz/rus-chat")
+    return RedirectResponse(f"https://enoma.kz/rus-chat?uid={uid}")
 
 # ================= TIMER =================
 @app.get("/session-time")

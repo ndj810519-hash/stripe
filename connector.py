@@ -1,4 +1,4 @@
-# === FIXED VERSION (ЖЁСТКИЙ КОНТРОЛЬ AGENT) ===
+# === FINAL STABLE VERSION (БЕЗ ЛОМАЮЩЕЙ ПРОВЕРКИ AGENT) ===
 
 from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse
@@ -59,21 +59,20 @@ def ask_voiceflow(data: UserMessage):
     user_data = user_doc.to_dict()
 
     expires_at = user_data.get("expiresAt")
-    user_agent = user_data.get("agent")
 
-    if user_agent != data.agent:
-        return {"expired": True, "text": "⛔ Неверный доступ"}
-
+    # ❌ нет времени
     if not expires_at:
         return {"expired": True, "text": "⛔ Оплатите доступ"}
 
     if hasattr(expires_at, "tzinfo") and expires_at.tzinfo:
         expires_at = expires_at.replace(tzinfo=None)
 
+    # ❌ время вышло
     if datetime.utcnow() > expires_at:
         user_ref.update({"hasAccess": False})
         return {"expired": True, "text": "⏳ Время истекло"}
 
+    # ✅ ВСЁ ОК → Voiceflow
     url = f"https://general-runtime.voiceflow.com/state/user/{data.user_id}/interact"
 
     response = requests.post(
@@ -103,10 +102,6 @@ def ask_voiceflow(data: UserMessage):
 # ================= CREATE ORDER =================
 @app.get("/create-forte-order")
 async def create_forte_order(uid: str, agent: str):
-
-    # 🔥 ЖЁСТКАЯ ПРОВЕРКА AGENT
-    if agent not in ["seidkona", "ruslan"]:
-        return RedirectResponse("https://enoma.kz/main-ru")
 
     payload = {
         "order": {
@@ -171,10 +166,6 @@ async def forte_success(request: Request):
     uid = order_data["uid"]
     agent = order_data.get("agent")
 
-    # ❌ если агент потерялся — стоп
-    if agent not in ["seidkona", "ruslan"]:
-        return RedirectResponse("https://enoma.kz/main-ru")
-
     now = datetime.utcnow()
     expires_at = now + timedelta(minutes=5)
 
@@ -185,14 +176,11 @@ async def forte_success(request: Request):
         "lastPaymentAt": now
     }, merge=True)
 
-    # 🔥 ЖЁСТКИЙ РЕДИРЕКТ
+    # ✅ РЕДИРЕКТ (agent сохраняем, но не ломаем систему)
     if agent == "seidkona":
         return RedirectResponse(f"https://enoma.kz/seid-chat?uid={uid}")
 
-    elif agent == "ruslan":
-        return RedirectResponse(f"https://enoma.kz/rus-chat?uid={uid}")
-
-    return RedirectResponse("https://enoma.kz/main-ru")
+    return RedirectResponse(f"https://enoma.kz/rus-chat?uid={uid}")
 
 # ================= TIMER =================
 @app.get("/session-time")

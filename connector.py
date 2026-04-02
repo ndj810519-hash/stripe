@@ -112,7 +112,7 @@ async def create_forte_order(uid: str):
             "currency": "KZT",
             "description": f"{uid}|5min",
             "title": "5-minute session",
-            "hppRedirectUrl": "https://stripe-2dya.onrender.com/forte-success"
+            "hppRedirectUrl": "https://seidkona-backend.onrender.com/forte-success"
         }
     }
 
@@ -187,7 +187,7 @@ async def forte_success(request: Request):
         "paidAt": now
     })
 
-    return RedirectResponse(f"https://enoma.kz/rus-chat?uid={uid}")
+    return RedirectResponse(f"http://enoma.kz/rus-chat?uid={uid}&paid=1")
 
 # ================= STATUS =================
 @app.get("/subscription-status")

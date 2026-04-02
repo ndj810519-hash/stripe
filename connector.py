@@ -112,7 +112,7 @@ async def create_forte_order(uid: str):
             "currency": "KZT",
             "description": f"{uid}|5min",
             "title": "5-minute session",
-            "hppRedirectUrl": "https://seidkona-backend.onrender.com/forte-success"
+            "hppRedirectUrl": "https://stripe-2dya.onrender.com/forte-success"
         }
     }
 
